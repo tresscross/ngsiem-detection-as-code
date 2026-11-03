@@ -1,0 +1,14 @@
+validate:
+  stage: validate
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_BRANCH
+  script:
+    - python scripts/validate_rules.py --json > validation_report.json || true  # report only; the next line gates the job
+    - python scripts/validate_rules.py
+  artifacts:
+    when: always
+    paths:
+      - validation_report.json
+    expire_in: 1 week

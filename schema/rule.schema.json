@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ngsiem-detection-as-code:rule-schema",
+  "title": "NG-SIEM Correlation Rule",
+  "description": "Schema for a single correlation rule YAML file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "name",
+    "severity",
+    "status",
+    "coverage_category",
+    "search",
+    "schedule",
+    "lifecycle"
+  ],
+  "properties": {
+    "id": {
+      "description": "Falcon-assigned rule ID. Null for new rules; populated by the apply job on first successful create.",
+      "type": ["string", "null"],
+      "pattern": "^[a-f0-9]{32}$|^$"
+    },
+    "name": {
+      "description": "Human-readable rule name. Must be unique across the repo.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 200
+    },
+    "description": {
+      "description": "What the rule detects and why it matters. Optional on imported rules.",
+      "type": ["string", "null"]
+    },
+    "severity": {
+      "description": "Falcon severity tier. Only five values are accepted by the create API: 10 (Informational), 30 (Low), 50 (Medium), 70 (High), 90 (Critical). Other values cause a 400 'expected RuleCreateRequestV1.Severity to be one of: 10 30 50 70 90'.",
+      "type": "integer",
+      "enum": [10, 30, 50, 70, 90]
+    },
+    "status": {
+      "description": "active = deployed and firing; inactive = deployed but disabled server-side.",
+      "type": "string",
+      "enum": ["active", "inactive"]
+    },
+    "tactic": {
+      "description": "MITRE ATT&CK tactic ID ('TA0001'). Legacy imported rules may carry the name form, but the create API rejects it. Optional.",
+      "type": ["string", "null"]
+    },
+    "technique": {
+      "description": "MITRE ATT&CK technique ID (T1078, T1078.004) or CrowdStrike custom technique (CST0001). Optional.",
+      "type": ["string", "null"],
+      "pattern": "^(T[0-9]{4}(\\.[0-9]{3})?|CST[0-9]{4})?$"
+    },
+    "coverage_category": {
+      "description": "Telemetry source the rule consumes. Bucket on the source, not the adversary behavior detected. endpoint = Falcon sensor + Linux audit + Windows EventLog + Sysmon + per-device network observation (proxy, firewall, DNS). cloud = AWS/Azure/GCP control- and data-plane (CloudTrail, Azure sign-in, GCP audit, VPC flow). identity = IDP and SaaS user-activity audit (Okta, Entra ID, M365, other SaaS audit logs).",
+      "type": "string",
+      "enum": ["endpoint", "cloud", "identity"]
+    },
+    "log_source": {
+      "description": "Optional. If set, must match a key in schema/log_sources.json.",
+      "type": ["string", "null"],
+      "minLength": 3
+    },
+    "runbook_url": {
+      "description": "Optional. If set, link to the rule's runbook (wiki, Confluence, etc.).",
+      "type": ["string", "null"],
+      "format": "uri"
+    },
+    "owner": {
+      "description": "Optional. Owning team or individual email.",
+      "type": ["string", "null"],
+      "minLength": 3
+    },
+    "notes": {
+      "description": "Free-text tuning notes, exception history, etc.",
+      "type": "string"
+    },
+    "search": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filter", "outcome", "lookback", "trigger_mode"],
+      "properties": {
+        "filter": {
+          "description": "CQL query. Subject to the CQL format linter unless lifecycle.standardization_pending is true.",
+          "type": "string",
+          "minLength": 10
+        },
+        "outcome": {
+          "type": ["string", "null"],
+          "enum": ["detection", "incident", "case", null]
+        },
+        "lookback": {
+          "description": "Query lookback window as Falcon stores it. Go-style multi-unit duration (e.g. '75m', '1h', '2h30m', '24h0m', '0h15m', '30s'). Zero-duration forms are caught by a dedicated lookback_zero check. Preserved verbatim from import.",
+          "type": ["string", "null"],
+          "pattern": "^([0-9]+[smhd])+$|^$"
+        },
+        "trigger_mode": {
+          "type": ["string", "null"],
+          "enum": ["summary", "smart", "all", "verbose", null]
+        }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["definition"],
+      "properties": {
+        "definition": {
+          "description": "Schedule as Falcon stores it. Accepts Falcon's multi-unit interval form (@every 1h, @every 1h0m, @every 2h30m, @every 0h5m) or a standard 5-field cron expression. Preserved verbatim from import — do NOT translate between forms; they are not equivalent.",
+          "type": ["string", "null"],
+          "pattern": "^@every\\s+([0-9]+[smhd])+$|^(\\S+\\s+){4}\\S+$"
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["created", "last_reviewed", "deletion_requested"],
+      "properties": {
+        "created": {
+          "type": "string",
+          "format": "date"
+        },
+        "last_reviewed": {
+          "type": "string",
+          "format": "date"
+        },
+        "deletion_requested": {
+          "description": "Two-step delete flag. Set true in one MR, then rm the file in a follow-up MR.",
+          "type": "boolean",
+          "default": false
+        },
+        "standardization_pending": {
+          "description": "Set true by the bootstrap importer for rules not yet meeting the CQL format standard. Exempts the rule from format linter checks 2-4. Cleared by sweep MRs.",
+          "type": "boolean",
+          "default": false
+        },
+        "legacy_ids": {
+          "description": "Optional array of prior Falcon IDs, in case rule ID churn is observed.",
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "jira_ticket": {
+          "description": "Optional ticket key (e.g. Jira) tracking the work for this rule. Tracking-only; absence does not block validation or CI.",
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9]+-[0-9]+$"
+        }
+      }
+    }
+  }
+}

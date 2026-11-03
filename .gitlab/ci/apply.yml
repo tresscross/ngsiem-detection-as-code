@@ -1,0 +1,123 @@
+apply:
+  stage: apply
+  rules:
+    # Only offer apply on non-scheduled pipelines (scheduled pipelines are for
+    # drift detection, not deployment). Without this condition, apply appears
+    # as a manual gate on scheduled runs and blocks drift from starting.
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE != "schedule"
+      when: manual  # Flip to `on_success` after 60 days of clean runs.
+  variables:
+    # Rename CI variables into what the script expects. Do NOT add a
+    # FALCON_CID: $FALCON_CID line here — that's a self-reference and
+    # GitLab emits the literal string "$FALCON_CID" instead of expanding.
+    # Project-level CI/CD variables flow through to the job environment
+    # automatically, so FALCON_CID reaches the script as-is.
+    FALCON_CLIENT_ID: $FALCON_CLIENT_ID_RW
+    FALCON_CLIENT_SECRET: $FALCON_CLIENT_SECRET_RW
+    GIT_STRATEGY: clone
+  before_script:
+    # Default before_script (inherited) installs git + pip deps. Then
+    # configure SSH access using the deploy key so this job can push the
+    # ID-backfill commit back to main. The SSH_DEPLOY_KEY CI variable is
+    # a File-type variable — $SSH_DEPLOY_KEY is the path to the private key.
+    - !reference [default, before_script]
+    - |
+      if [ -n "$SSH_DEPLOY_KEY" ] && [ -f "$SSH_DEPLOY_KEY" ]; then
+        apt-get install -y -qq --no-install-recommends openssh-client
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        # Normalize line endings (CRLF → LF) and ensure a single trailing
+        # newline. Keys pasted into the GitLab variable UI sometimes carry
+        # Windows line endings or lose the terminating newline, which makes
+        # OpenSSH fail with "error in libcrypto" on load.
+        tr -d '\r' < "$SSH_DEPLOY_KEY" > ~/.ssh/id_ed25519
+        if [ -n "$(tail -c 1 ~/.ssh/id_ed25519)" ]; then
+          printf '\n' >> ~/.ssh/id_ed25519
+        fi
+        chmod 600 ~/.ssh/id_ed25519
+        ssh-keyscan -H "$CI_SERVER_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+        # Verify the key parses before attempting any git operation; helpful
+        # diagnostic if the key is malformed in a way tr/tail can't repair.
+        if ! ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null 2>&1; then
+          echo "ERROR: SSH_DEPLOY_KEY failed to parse after normalization."
+          echo "Regenerate with 'ssh-keygen -t ed25519' and re-paste the full"
+          echo "key INCLUDING the BEGIN/END lines into the GitLab variable."
+          unset SSH_DEPLOY_KEY  # disable backfill push path downstream
+        else
+          git config user.email "${DAC_BOT_EMAIL:-dac-bot@users.noreply.example.com}"
+          git config user.name "Detection-as-Code Bot"
+          git remote set-url origin "git@${CI_SERVER_HOST}:${CI_PROJECT_PATH}.git"
+          echo "SSH deploy key configured; backfill push enabled."
+        fi
+      else
+        echo "SSH_DEPLOY_KEY not set; backfill push will be skipped. Run 'make import-overwrite' locally after apply."
+      fi
+  script:
+    # Wrap everything in one script block so we can control the exit code
+    # explicitly. Apply should continue past partial failures AND still push
+    # any backfills that DID get written — a failure on one rule shouldn't
+    # orphan newly-created rule IDs on the ephemeral runner.
+    - |
+      # Determine which rule deletions to honor. Deletions are detected by
+      # diffing removed rule files, so the FROM ref must reach back to the last
+      # state we actually applied — NOT HEAD~1. Apply is a manual gate and each
+      # apply also pushes a backfill commit, so HEAD~1 routinely points at an
+      # unrelated commit; any delete merged while apply was deferred (or buried
+      # under a later merge) was silently dropped. We track the last applied tip
+      # as the tag `dac-last-applied` and diff from there, falling back to HEAD~1
+      # on first run so behavior degrades safely. Worst case if the range is too
+      # wide: redundant deletes for already-gone rules, which are no-ops.
+      git fetch --tags --quiet origin 2>/dev/null || true
+      if FROM_REF=$(git rev-parse --verify --quiet "refs/tags/dac-last-applied^{commit}"); then
+        echo "Computing deletions since last applied tip: $FROM_REF"
+      else
+        FROM_REF="HEAD~1"
+        echo "No dac-last-applied tag yet; falling back to HEAD~1"
+      fi
+      DELETED_NAMES=$(scripts/deleted_rule_names.sh "$FROM_REF")
+      python scripts/sync_detections.py --apply --deleted-rule-names "$DELETED_NAMES"
+      APPLY_EXIT=$?
+      echo "---"
+      echo "sync_detections.py exit code: $APPLY_EXIT"
+
+      # Backfill push runs REGARDLESS of apply exit code. Successful creates
+      # may have written their Falcon-assigned IDs to the local YAML; the push
+      # carries those to main so subsequent plans see them.
+      if [ -n "$SSH_DEPLOY_KEY" ] && [ -f "$SSH_DEPLOY_KEY" ]; then
+        if git diff --quiet -- rules/; then
+          echo "No id backfills to commit."
+        else
+          git add rules/
+          git commit -m "backfill: Falcon-assigned rule ids from apply $CI_PIPELINE_ID [skip ci]"
+          if git push origin "HEAD:${CI_COMMIT_BRANCH}"; then
+            echo "Backfilled IDs pushed to ${CI_COMMIT_BRANCH}."
+          else
+            echo "WARNING: backfill push failed. Reconcile via 'make import-overwrite' locally."
+          fi
+        fi
+      else
+        echo "SSH_DEPLOY_KEY not configured — skipping backfill push. See plan.txt CREATED section for manual reconcile."
+      fi
+
+      # Advance the last-applied marker to the current tip (after any backfill
+      # commit) only on a clean apply, so the next run diffs deletions from here
+      # even if several merges stack before it. Tag push reuses the deploy key;
+      # if it fails the marker simply stays put and the next run re-diffs from
+      # an older point (safe — redundant no-op deletes, never missed ones).
+      if [ "$APPLY_EXIT" -eq 0 ] && [ -n "$SSH_DEPLOY_KEY" ] && [ -f "$SSH_DEPLOY_KEY" ]; then
+        git tag -f dac-last-applied HEAD
+        if git push -f origin "refs/tags/dac-last-applied"; then
+          echo "Advanced dac-last-applied to $(git rev-parse --short HEAD)."
+        else
+          echo "WARNING: could not push dac-last-applied tag; next apply will re-diff from the prior marker."
+        fi
+      fi
+
+      # Surface the apply's exit code as the job's exit code so CI flags the
+      # partial failure. But the backfill above has already run.
+      exit $APPLY_EXIT
+  artifacts:
+    when: always
+    paths:
+      - plan.txt
+    expire_in: 6 months

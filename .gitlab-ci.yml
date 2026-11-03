@@ -1,0 +1,33 @@
+# GitLab CI pipeline for detection-as-code.
+#
+# Credential model:
+#   FALCON_CLIENT_ID_RO / FALCON_CLIENT_SECRET_RO  - used by validate, plan, drift
+#   FALCON_CLIENT_ID_RW / FALCON_CLIENT_SECRET_RW  - used ONLY by apply (default branch)
+#   FALCON_BASE_URL                                - tenant URL, not secret
+#   FALCON_CID                                     - tenant Customer ID, used ONLY by apply
+#   SSH_DEPLOY_KEY (File, optional)                - lets apply/drift push id backfills + reconciles
+#   DAC_BOT_EMAIL (optional)                       - commit author email for bot commits
+# Both pairs must be stored as masked + protected CI/CD variables.
+
+stages:
+  - validate
+  - plan
+  - apply
+  - drift
+  - coverage
+
+default:
+  image: python:3.11-slim
+  # Add `tags:` here if your runners require them.
+  before_script:
+    # python:3.11-slim omits git; apply and plan both shell out to `git diff`
+    # to identify deleted rule files, so we need it.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - pip install --quiet -e .
+
+include:
+  - local: .gitlab/ci/validate.yml
+  - local: .gitlab/ci/plan.yml
+  - local: .gitlab/ci/apply.yml
+  - local: .gitlab/ci/drift.yml
+  - local: .gitlab/ci/coverage.yml

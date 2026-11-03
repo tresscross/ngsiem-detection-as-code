@@ -1,0 +1,45 @@
+# Template for a new correlation rule. Copy into rules/ and edit:
+#   cp examples/rule_template.yml rules/<your_slug>.yml
+# Leave `id: null` — the apply job backfills the Falcon-assigned id.
+id: null
+name: okta impossible travel
+description: Successful Okta sign-ins for the same user from two different countries within the lookback window, a common sign of credential theft or session hijacking.
+severity: 50
+status: active
+tactic: TA0001
+technique: T1078.004
+coverage_category: identity
+log_source: Okta_Workforce_Identity
+runbook_url: null
+owner: null
+notes: |
+  Tune by excluding your corporate egress ranges and known VPN / cloud-proxy ASNs
+  before the groupBy. Keep the reasoning for each exclusion here.
+search:
+  filter: |-
+    #Vendor="okta" #event.module="okta" #event.dataset="okta.system"
+    | eventType=/user\.session\.start/
+    | outcome.result="SUCCESS"
+    | ipLocation(client.ipAddress)
+    | asn(client.ipAddress)
+    | groupBy([actor.alternateId],
+        function=[
+          collect([client.ipAddress, client.ipAddress.city, client.ipAddress.state,
+                   client.ipAddress.country, client.ipAddress.org, eventType]),
+          selectLast([client.ipAddress.country], as=last_country),
+          selectFromMax(field=@timestamp, include=[client.ipAddress.country], as=curr)
+        ])
+    | last_country != curr.client.ipAddress.country
+    | format(format="Okta impossible travel for %s between %s and %s",
+             field=[actor.alternateId, last_country, curr.client.ipAddress.country],
+             as=detection.description)
+  outcome: detection
+  lookback: 1h0m
+  trigger_mode: summary
+schedule:
+  definition: '@every 1h0m'
+lifecycle:
+  created: '2026-01-01'
+  last_reviewed: '2026-01-01'
+  deletion_requested: false
+  standardization_pending: false

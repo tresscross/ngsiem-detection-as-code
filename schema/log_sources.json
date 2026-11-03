@@ -1,0 +1,23 @@
+{
+  "$comment": "Illustrative sample. Replace with the log sources onboarded in your NG-SIEM tenant; a rule's optional `log_source` must be one of these keys.",
+  "sources": {
+    "AWS_CloudTrail_Logs": {
+      "display": "AWS CloudTrail Logs"
+    },
+    "CrowdStrike_Falcon_Sensor": {
+      "display": "CrowdStrike Falcon Sensor (EDR)"
+    },
+    "Google_GCP_Cloud_Audit_Logs": {
+      "display": "Google GCP Cloud Audit Logs"
+    },
+    "Microsoft_365_Unified_Audit_Log": {
+      "display": "Microsoft 365 Unified Audit Log"
+    },
+    "Microsoft_Entra_ID_Logs": {
+      "display": "Microsoft Entra ID Logs"
+    },
+    "Okta_Workforce_Identity": {
+      "display": "Okta Workforce Identity"
+    }
+  }
+}

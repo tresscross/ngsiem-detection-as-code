@@ -1,0 +1,102 @@
+drift:
+  stage: drift
+  # Run as soon as the pipeline starts — do not wait for earlier stages.
+  needs: []
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule" && $DRIFT_CHECK == "true"
+  variables:
+    FALCON_CLIENT_ID: $FALCON_CLIENT_ID_RO
+    FALCON_CLIENT_SECRET: $FALCON_CLIENT_SECRET_RO
+    GIT_STRATEGY: clone
+  before_script:
+    - !reference [default, before_script]
+    # SSH setup if a deploy key is configured — needed for the auto-reconcile push to main.
+    - |
+      if [ -n "$SSH_DEPLOY_KEY" ] && [ -f "$SSH_DEPLOY_KEY" ]; then
+        apt-get install -y -qq --no-install-recommends openssh-client
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        # Normalize line endings (CRLF → LF) and ensure trailing newline.
+        # Keys pasted into GitLab variables sometimes carry Windows endings
+        # or drop the terminating newline, causing "error in libcrypto".
+        tr -d '\r' < "$SSH_DEPLOY_KEY" > ~/.ssh/id_ed25519
+        if [ -n "$(tail -c 1 ~/.ssh/id_ed25519)" ]; then
+          printf '\n' >> ~/.ssh/id_ed25519
+        fi
+        chmod 600 ~/.ssh/id_ed25519
+        ssh-keyscan -H "$CI_SERVER_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+        if ! ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null 2>&1; then
+          echo "ERROR: SSH_DEPLOY_KEY failed to parse after normalization."
+          echo "Regenerate and re-paste the full key (including BEGIN/END lines)."
+          unset SSH_DEPLOY_KEY
+        else
+          git config user.email "${DAC_BOT_EMAIL:-dac-bot@users.noreply.example.com}"
+          git config user.name "Detection-as-Code Bot"
+          git remote set-url origin "git@${CI_SERVER_HOST}:${CI_PROJECT_PATH}.git"
+          echo "SSH deploy key configured; auto-reconcile enabled."
+        fi
+      else
+        echo "SSH_DEPLOY_KEY not configured; drift will alert only (no auto-reconcile push)."
+      fi
+  script:
+    - |
+      # First: run drift detection. If clean, we're done.
+      # GitLab runs script blocks with `set -e`, so a bare invocation followed
+      # by `DRIFT_EXIT=$?` would abort the shell on any non-zero exit before
+      # the assignment — meaning drift's signal exit code (5) would kill the
+      # job before the auto-reconcile logic below could run. `|| DRIFT_EXIT=$?`
+      # neutralizes set -e and captures the actual code.
+      DRIFT_EXIT=0
+      python scripts/sync_detections.py --drift || DRIFT_EXIT=$?
+
+      if [ "$DRIFT_EXIT" != "5" ]; then
+        # Exit code 5 = drift found. Anything else (0 = clean, 4 = API
+        # failure, etc.) passes through unchanged.
+        exit $DRIFT_EXIT
+      fi
+
+      echo ""
+      echo "================================================================"
+      echo "DRIFT DETECTED — Falcon state differs from main."
+      echo "plan.txt contains the diff."
+      echo "================================================================"
+
+      # Auto-reconcile path requires SSH deploy key. Without it, we just alert.
+      if [ -z "$SSH_DEPLOY_KEY" ] || [ ! -f "$SSH_DEPLOY_KEY" ]; then
+        echo "No SSH_DEPLOY_KEY — cannot auto-reconcile. Run 'make import-overwrite'"
+        echo "locally and open a reconciliation MR manually."
+        exit 1  # fail the pipeline so notifications fire
+      fi
+
+      # Pull Falcon's current state into local YAML files.
+      python scripts/import_from_falcon.py --overwrite
+
+      if git diff --quiet; then
+        echo "Drift plan said changes existed, but import produced no local diff."
+        echo "This can happen if drift is in fields NOT in UPDATE_WHITELIST."
+        echo "Inspect plan.txt manually."
+        exit 1
+      fi
+
+      # Push the reconcile commit directly to main via the SSH deploy key —
+      # matches the apply job's id-backfill flow, which also bypasses the MR
+      # layer. A deploy key avoids needing a project access token to drive an
+      # auto-merge via the GitLab API; direct push is the simplest path.
+      # The commit carries [skip ci] to avoid the merge triggering another
+      # pipeline. plan.txt (artifact) + the commit itself are the audit trail.
+      git add rules/
+      git commit -m "reconcile: absorb Falcon UI changes detected by drift pipeline $CI_PIPELINE_ID [skip ci]"
+
+      if ! git push origin HEAD:"$CI_DEFAULT_BRANCH"; then
+        echo "Failed to push reconcile commit to $CI_DEFAULT_BRANCH."
+        echo "Most likely cause: branch protection on $CI_DEFAULT_BRANCH rejects direct pushes"
+        echo "from the SSH deploy key. Grant the deploy key push access or allow the key"
+        echo "to bypass branch protection on $CI_DEFAULT_BRANCH."
+        exit 1
+      fi
+      echo "Drift reconciled directly to $CI_DEFAULT_BRANCH via pipeline $CI_PIPELINE_ID."
+  artifacts:
+    when: always
+    paths:
+      - plan.txt
+    expire_in: 3 months

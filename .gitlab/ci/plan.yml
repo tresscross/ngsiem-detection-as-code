@@ -1,0 +1,22 @@
+plan:
+  stage: plan
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    FALCON_CLIENT_ID: $FALCON_CLIENT_ID_RO
+    FALCON_CLIENT_SECRET: $FALCON_CLIENT_SECRET_RO
+  script:
+    - DELETED_NAMES=$(scripts/deleted_rule_names.sh "origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+    - python scripts/sync_detections.py --plan --deleted-rule-names "$DELETED_NAMES" || EXIT=$?
+    - |
+      if [ "$EXIT" = "2" ]; then
+        echo "Plan has changes — this is expected on an MR that modifies rules. Inspect plan.txt."
+        exit 0
+      elif [ "$EXIT" != "" ] && [ "$EXIT" != "0" ]; then
+        exit $EXIT
+      fi
+  artifacts:
+    when: always
+    paths:
+      - plan.txt
+    expire_in: 1 month

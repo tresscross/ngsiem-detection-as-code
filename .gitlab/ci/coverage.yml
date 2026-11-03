@@ -1,0 +1,18 @@
+coverage_summary:
+  stage: coverage
+  # Independent of validate/plan/apply — coverage tabulation doesn't require
+  # any Falcon API call or prior stage output. Faster pipelines.
+  needs: []
+  rules:
+    # On every merge to main: keep the artifact fresh with the post-merge state.
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # On the nightly scheduled pipeline: produce a fresh artifact even when
+    # there were no merges. Downstream consumers (dashboards, SOAR) can
+    # always fetch the latest main pipeline's artifact.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - python scripts/coverage_summary.py --out coverage_summary.json
+  artifacts:
+    paths:
+      - coverage_summary.json
+    expire_in: 30 days
